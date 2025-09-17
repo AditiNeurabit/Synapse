@@ -889,7 +889,8 @@ class ChatGPTCapture {
       inspectDOMStructure: () => this.inspectDOMStructure(),
       getMessageStats: () => this.getMessageStats(),
       debugMessageParsing: (element) => this.debugMessageParsing(element),
-      testFiltering: (text, role) => this.testFiltering(text, role)
+      testFiltering: (text, role) => this.testFiltering(text, role),
+      debugCurrentDOM: () => this.debugCurrentDOM()
     };
 
     console.log('Synapse: Debug functions available at window.synapseDebug');
@@ -1027,6 +1028,60 @@ class ChatGPTCapture {
     
     console.log('Synapse: Filtering test result:', result);
     return result;
+  }
+
+  /**
+   * Debug function to inspect current ChatGPT DOM structure
+   */
+  debugCurrentDOM() {
+    console.log('Synapse: Debugging current ChatGPT DOM structure...');
+    
+    const chatContainer = this.findChatContainer();
+    if (!chatContainer) {
+      console.log('Synapse: No chat container found');
+      return { error: 'No chat container found' };
+    }
+
+    // Find all potential message elements
+    const allElements = chatContainer.querySelectorAll('*');
+    const potentialMessages = [];
+    
+    allElements.forEach((element, index) => {
+      const text = element.textContent?.trim();
+      if (text && text.length > 5 && text.length < 500) {
+        // Check if this looks like a message
+        const hasMessageIndicators = 
+          element.querySelector('[data-message-author-role]') ||
+          element.querySelector('.markdown') ||
+          element.querySelector('.prose') ||
+          element.querySelector('[data-testid*="conversation-turn"]') ||
+          element.className.includes('message') ||
+          element.className.includes('conversation') ||
+          element.className.includes('markdown');
+        
+        if (hasMessageIndicators || text.includes('Heyyy') || text.includes('All good here')) {
+          potentialMessages.push({
+            index,
+            tagName: element.tagName,
+            className: element.className,
+            text: text.substring(0, 100) + (text.length > 100 ? '...' : ''),
+            hasDataRole: element.getAttribute('data-message-author-role'),
+            hasTestId: element.getAttribute('data-testid'),
+            hasTurn: element.getAttribute('data-turn'),
+            hasMarkdown: !!element.querySelector('.markdown'),
+            hasProse: !!element.querySelector('.prose'),
+            parsedMessage: this.parseConversationTurn(element) || this.parseMessageElement(element)
+          });
+        }
+      }
+    });
+
+    console.log('Synapse: Found potential message elements:', potentialMessages);
+    return { 
+      chatContainer: chatContainer.tagName, 
+      potentialMessages,
+      totalElements: allElements.length
+    };
   }
 
   /**
