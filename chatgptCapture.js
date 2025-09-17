@@ -206,20 +206,31 @@ class ChatGPTCapture {
       const roleElement = article.querySelector('[data-message-author-role]');
       if (roleElement) {
         role = roleElement.getAttribute('data-message-author-role') === 'user' ? 'user' : 'assistant';
+        console.log(`Synapse: Found explicit role from DOM: ${role}`);
       } else {
         // Determine role by analyzing content and structure
         role = this.determineMessageRole(article, textContent, index);
+        console.log(`Synapse: Determined role from content: ${role} (index: ${index})`);
       }
 
       // Skip if we couldn't determine role
-      if (role === 'unknown') return null;
+      if (role === 'unknown') {
+        console.log(`Synapse: Skipping message with unknown role:`, textContent.substring(0, 50));
+        return null;
+      }
 
       // Extract clean text content
       let cleanText = this.extractCleanText(article, role);
-      if (!cleanText || cleanText.length < 2) return null;
+      if (!cleanText || cleanText.length < 2) {
+        console.log(`Synapse: Skipping message with no clean text:`, textContent.substring(0, 50));
+        return null;
+      }
 
       // Skip obvious UI text
-      if (this.isNotRealMessage(cleanText, role)) return null;
+      if (this.isNotRealMessage(cleanText, role)) {
+        console.log(`Synapse: Skipping message as UI text:`, cleanText.substring(0, 50));
+        return null;
+      }
 
       // Generate unique ID based on content and position
       const timestamp = new Date().toISOString();
@@ -244,7 +255,8 @@ class ChatGPTCapture {
       console.log(`Synapse: Parsed ${role} message:`, {
         id: message.id,
         preview: cleanText.substring(0, 50) + (cleanText.length > 50 ? '...' : ''),
-        wordCount: message.wordCount
+        wordCount: message.wordCount,
+        originalText: textContent.substring(0, 100)
       });
 
       return message;
@@ -259,6 +271,12 @@ class ChatGPTCapture {
    * Determine message role based on content and structure
    */
   determineMessageRole(article, textContent, index) {
+    // First check for explicit role indicators in the DOM
+    const roleFromDOM = this.getRoleFromDOM(article);
+    if (roleFromDOM) {
+      return roleFromDOM;
+    }
+
     // Check for user patterns
     if (this.looksLikeUserMessage(textContent, article)) {
       return 'user';
@@ -269,8 +287,78 @@ class ChatGPTCapture {
       return 'assistant';
     }
 
-    // Use alternating pattern as fallback (user-assistant-user-assistant...)
-    return index % 2 === 0 ? 'user' : 'assistant';
+    // Use improved alternating pattern based on conversation flow
+    return this.determineRoleByPosition(article, textContent, index);
+  }
+
+  /**
+   * Determine role by position in conversation flow
+   */
+  determineRoleByPosition(article, textContent, index) {
+    // Get all articles to understand the conversation flow
+    const allArticles = document.querySelectorAll('article');
+    const currentIndex = Array.from(allArticles).indexOf(article);
+    
+    // Look for patterns in the conversation
+    // Typically: user -> assistant -> user -> assistant
+    // But ChatGPT might have multiple assistant messages in a row
+    
+    // Check if this looks like a continuation of previous assistant message
+    if (currentIndex > 0) {
+      const prevArticle = allArticles[currentIndex - 1];
+      const prevText = prevArticle.textContent?.trim() || '';
+      
+      // If previous message was assistant and this is short, might be continuation
+      if (this.looksLikeAssistantMessage(prevText, prevArticle) && 
+          textContent.length < 100 && 
+          !textContent.includes('?')) {
+        return 'assistant';
+      }
+    }
+    
+    // Default alternating pattern, but start with user
+    return currentIndex % 2 === 0 ? 'user' : 'assistant';
+  }
+
+  /**
+   * Get role from DOM attributes and structure
+   */
+  getRoleFromDOM(article) {
+    // Check for explicit role attributes
+    const roleElement = article.querySelector('[data-message-author-role]');
+    if (roleElement) {
+      const role = roleElement.getAttribute('data-message-author-role');
+      return role === 'user' ? 'user' : 'assistant';
+    }
+
+    // Check for other role indicators
+    const roleIndicators = [
+      '[data-author="user"]',
+      '[data-author="assistant"]',
+      '.user-message',
+      '.assistant-message',
+      '[class*="user"]',
+      '[class*="assistant"]'
+    ];
+
+    for (const selector of roleIndicators) {
+      const element = article.querySelector(selector);
+      if (element) {
+        if (selector.includes('user') || element.className.includes('user')) {
+          return 'user';
+        } else if (selector.includes('assistant') || element.className.includes('assistant')) {
+          return 'assistant';
+        }
+      }
+    }
+
+    // Check for ChatGPT-specific indicators
+    const chatgptIndicators = article.querySelectorAll('[class*="chatgpt"], [class*="gpt"], [class*="ai"]');
+    if (chatgptIndicators.length > 0) {
+      return 'assistant';
+    }
+
+    return null;
   }
 
   /**
@@ -279,8 +367,18 @@ class ChatGPTCapture {
   looksLikeUserMessage(text, element) {
     const lowerText = text.toLowerCase().trim();
     
-    // Very short messages are often user inputs
-    if (lowerText.length < 20 && !lowerText.includes('.') && !lowerText.includes(',')) {
+    // Skip if empty or too short
+    if (lowerText.length < 2) return false;
+    
+    // Check for explicit user indicators in DOM
+    if (this.hasUserIndicators(element)) {
+      return true;
+    }
+
+    // Very short messages are often user inputs (but not too short)
+    if (lowerText.length < 50 && lowerText.length > 2 && 
+        !lowerText.includes('.') && !lowerText.includes(',') && 
+        !lowerText.includes('```') && !lowerText.includes('**')) {
       return true;
     }
 
@@ -288,10 +386,53 @@ class ChatGPTCapture {
     const questionPatterns = [
       /^(what|how|when|where|why|who|can you|could you|would you|will you)\b/i,
       /\?$/,
-      /^(help|tell me|show me|explain)/i
+      /^(help|tell me|show me|explain|i need|i want|i'm looking for)/i,
+      /^(please|can|could|would|will)\s/i,
+      /^(i have|i'm having|i got|i received)/i
     ];
 
-    return questionPatterns.some(pattern => pattern.test(lowerText));
+    if (questionPatterns.some(pattern => pattern.test(lowerText))) {
+      return true;
+    }
+
+    // Check for command/request patterns
+    const commandPatterns = [
+      /^(write|create|make|build|generate|code|program|script)/i,
+      /^(fix|solve|debug|error|problem|issue)/i,
+      /^(translate|convert|change|modify|update)/i,
+      /^(analyze|review|check|examine|look at)/i
+    ];
+
+    if (commandPatterns.some(pattern => pattern.test(lowerText))) {
+      return true;
+    }
+
+    // Check for conversational patterns that are typically user
+    const userPatterns = [
+      /^(thanks|thank you|thx|appreciate)/i,
+      /^(yes|no|ok|okay|sure|alright)/i,
+      /^(i think|i believe|i feel|i guess)/i,
+      /^(my|mine|i'm|i am|i have|i need)/i
+    ];
+
+    return userPatterns.some(pattern => pattern.test(lowerText));
+  }
+
+  /**
+   * Check for user indicators in DOM structure
+   */
+  hasUserIndicators(element) {
+    // Check for user-specific classes or attributes
+    const userSelectors = [
+      '[class*="user"]',
+      '[class*="human"]',
+      '[data-author="user"]',
+      '[data-role="user"]',
+      '.user-input',
+      '.human-message'
+    ];
+
+    return userSelectors.some(selector => element.querySelector(selector) !== null);
   }
 
   /**
@@ -300,22 +441,78 @@ class ChatGPTCapture {
   looksLikeAssistantMessage(text, element) {
     const lowerText = text.toLowerCase().trim();
     
+    // Skip if empty or too short
+    if (lowerText.length < 2) return false;
+    
+    // Check for explicit assistant indicators in DOM
+    if (this.hasAssistantIndicators(element)) {
+      return true;
+    }
+
     // Check for common assistant response patterns
     const assistantPatterns = [
       /^(i understand|i can help|here's|let me|based on|i'll|to answer)/i,
       /^(the expression is|it can't be|let me know)/i,
       /^(hey|hi|hello).*(how's it|what's)/i,
-      /^(absolutely|sure|of course|i'd be happy)/i
+      /^(absolutely|sure|of course|i'd be happy)/i,
+      /^(i'm|i am) (an ai|a language model|chatgpt)/i,
+      /^(as an ai|as a language model)/i,
+      /^(i don't have|i cannot|i'm not able)/i,
+      /^(here is|here are|this is|these are)/i,
+      /^(you can|you should|you might|you could)/i,
+      /^(to help you|to assist you|to answer your)/i
     ];
+
+    if (assistantPatterns.some(pattern => pattern.test(lowerText))) {
+      return true;
+    }
 
     // Check for markdown or code formatting (common in assistant responses)
     const hasFormatting = element.querySelector('code') || 
                          element.querySelector('pre') ||
+                         element.querySelector('.markdown') ||
                          text.includes('**') ||
-                         text.includes('```');
+                         text.includes('```') ||
+                         text.includes('`') ||
+                         text.includes('*') ||
+                         text.includes('#');
 
-    return assistantPatterns.some(pattern => pattern.test(lowerText)) || 
-           (hasFormatting && lowerText.length > 20);
+    // Long responses with formatting are likely assistant messages
+    if (hasFormatting && lowerText.length > 20) {
+      return true;
+    }
+
+    // Check for structured responses (lists, explanations)
+    const hasStructure = text.includes('\n') || 
+                        text.includes('1.') || 
+                        text.includes('•') || 
+                        text.includes('- ') ||
+                        text.includes(':');
+
+    if (hasStructure && lowerText.length > 30) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Check for assistant indicators in DOM structure
+   */
+  hasAssistantIndicators(element) {
+    // Check for assistant-specific classes or attributes
+    const assistantSelectors = [
+      '[class*="assistant"]',
+      '[class*="ai"]',
+      '[class*="chatgpt"]',
+      '[class*="gpt"]',
+      '[data-author="assistant"]',
+      '[data-role="assistant"]',
+      '.assistant-message',
+      '.ai-message'
+    ];
+
+    return assistantSelectors.some(selector => element.querySelector(selector) !== null);
   }
 
   /**
@@ -330,15 +527,30 @@ class ChatGPTCapture {
 
     let text = textElement.textContent?.trim() || '';
 
-    // Clean up the text
+    // Clean up the text based on role
     if (role === 'assistant') {
       text = this.cleanChatGPTResponse(text);
+    } else if (role === 'user') {
+      text = this.cleanUserMessage(text);
     }
 
     // Remove multiple spaces and normalize
     text = text.replace(/\s+/g, ' ').trim();
 
     return text;
+  }
+
+  /**
+   * Clean up user message text
+   */
+  cleanUserMessage(text) {
+    if (!text) return text;
+    
+    return text
+      .replace(/^\s*You\s*said:\s*/i, '')  // Remove "You said:" prefix
+      .replace(/^\s*said:\s*/i, '')         // Remove "said:" prefix
+      .replace(/\s+/g, ' ')
+      .trim();
   }
 
   /**
@@ -387,12 +599,25 @@ class ChatGPTCapture {
 
     // Skip common UI artifacts
     const uiArtifacts = [
-      'chatgpt said:', 'you said:', 'said:', 
       'loading', 'thinking', 'typing',
       'new chat', 'upgrade to', 'temporary chat'
     ];
 
-    return uiArtifacts.some(artifact => cleanText.includes(artifact));
+    // For user messages, be much less restrictive
+    if (role === 'user') {
+      // Only filter out obvious UI artifacts, not message prefixes
+      // "you said:" is actually a legitimate user message prefix
+      return uiArtifacts.some(artifact => cleanText.includes(artifact));
+    }
+
+    // For assistant messages, filter out message prefixes but be more careful
+    const assistantArtifacts = [
+      'chatgpt said:', 'said:', 
+      'loading', 'thinking', 'typing',
+      'new chat', 'upgrade to', 'temporary chat'
+    ];
+    
+    return assistantArtifacts.some(artifact => cleanText.includes(artifact));
   }
 
   /**
@@ -479,6 +704,8 @@ class ChatGPTCapture {
       getProcessedCount: () => this.processedMessages.size,
       forceSave: () => this.saveMessages(),
       testMessageDetection: () => this.testMessageDetection(),
+      debugMessageDetection: () => this.debugMessageDetection(),
+      findUserMessagesByPattern: () => this.findUserMessagesByPattern(),
       getMessageStats: () => this.getMessageStats(),
       debugCurrentDOM: () => this.debugCurrentDOM()
     };
@@ -502,7 +729,85 @@ class ChatGPTCapture {
     };
 
     console.log('Synapse: Message detection test:', stats);
+    
+    // Log detailed analysis of each message
+    messages.forEach((msg, index) => {
+      console.log(`Message ${index + 1}:`, {
+        role: msg.role,
+        preview: msg.text.substring(0, 100) + (msg.text.length > 100 ? '...' : ''),
+        wordCount: msg.wordCount,
+        hasCode: msg.hasCode,
+        hasMarkdown: msg.hasMarkdown
+      });
+    });
+    
     return stats;
+  }
+
+  /**
+   * Debug current DOM structure and message detection
+   */
+  debugMessageDetection() {
+    const allTurns = document.querySelectorAll('article');
+    console.log(`Synapse: Found ${allTurns.length} article elements`);
+    
+    allTurns.forEach((article, index) => {
+      const textContent = article.textContent?.trim() || '';
+      const roleFromDOM = this.getRoleFromDOM(article);
+      const looksLikeUser = this.looksLikeUserMessage(textContent, article);
+      const looksLikeAssistant = this.looksLikeAssistantMessage(textContent, article);
+      const finalRole = this.determineMessageRole(article, textContent, index);
+      
+      console.log(`Article ${index + 1}:`, {
+        textLength: textContent.length,
+        preview: textContent.substring(0, 50) + '...',
+        roleFromDOM,
+        looksLikeUser,
+        looksLikeAssistant,
+        finalRole,
+        hasDataRole: !!article.querySelector('[data-message-author-role]'),
+        classes: Array.from(article.classList).join(' '),
+        innerHTML: article.innerHTML.substring(0, 200) + '...'
+      });
+    });
+  }
+
+  /**
+   * Find user messages using ChatGPT-specific patterns
+   */
+  findUserMessagesByPattern() {
+    const userMessages = [];
+    
+    // Look for common ChatGPT user message patterns
+    const userSelectors = [
+      // Common ChatGPT user message containers
+      '[data-message-author-role="user"]',
+      '[class*="user-message"]',
+      '[class*="human"]',
+      // Look for input areas or user-specific containers
+      'div[class*="user"]',
+      'div[class*="human"]',
+      // Look for messages that don't have ChatGPT-specific indicators
+      'article:not([class*="assistant"]):not([class*="ai"]):not([class*="chatgpt"])'
+    ];
+    
+    userSelectors.forEach(selector => {
+      const elements = document.querySelectorAll(selector);
+      elements.forEach(element => {
+        const text = element.textContent?.trim();
+        if (text && text.length > 2 && !this.isUIElement(element, text)) {
+          userMessages.push({
+            element,
+            text: text.substring(0, 100),
+            selector,
+            fullText: text
+          });
+        }
+      });
+    });
+    
+    console.log('Synapse: Found potential user messages:', userMessages);
+    return userMessages;
   }
 
   /**
