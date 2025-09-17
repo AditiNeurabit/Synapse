@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Synapse Auto-Capture",
+  "version": "1.0.0",
+  "description": "Automatically captures conversations from supported LLM websites",
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://chat.openai.com/*",
+    "https://chatgpt.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://chat.openai.com/*", "https://chatgpt.com/*"],
+      "js": ["memoryHandler.js", "chatgptCapture.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Synapse Auto-Capture"
+  }
+}
